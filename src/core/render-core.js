@@ -17,8 +17,25 @@ async function createBrowser(opts) {
     browserOpts.executablePath = config.BROWSER_EXECUTABLE_PATH;
   }
   browserOpts.headless = !config.DEBUG_MODE;
-  browserOpts.args = ['--disable-gpu', '--no-sandbox', '--disable-setuid-sandbox'];
+  browserOpts.args = ['--no-sandbox', '--disable-setuid-sandbox'];
+  if (!opts.enableGPU || navigator.userAgent.indexOf('Win') !== -1) {
+    browserOpts.args.push('--disable-gpu');
+  }
   return puppeteer.launch(browserOpts);
+}
+
+async function getFullPageHeight(page) {
+  const height = await page.evaluate(() => {
+    const { body, documentElement } = document;
+    return Math.max(
+      body.scrollHeight,
+      body.offsetHeight,
+      documentElement.clientHeight,
+      documentElement.scrollHeight,
+      documentElement.offsetHeight
+    );
+  });
+  return height;
 }
 
 async function render(_opts = {}) {
@@ -33,7 +50,7 @@ async function render(_opts = {}) {
       height: 1200,
     },
     goto: {
-      waitUntil: 'networkidle2',
+      waitUntil: 'networkidle0',
     },
     output: 'pdf',
     pdf: {
@@ -47,7 +64,7 @@ async function render(_opts = {}) {
     failEarly: false,
   }, _opts);
 
-  if (_.get(_opts, 'pdf.width') && _.get(_opts, 'pdf.height')) {
+  if ((_.get(_opts, 'pdf.width') && _.get(_opts, 'pdf.height')) || _.get(opts, 'pdf.fullPage')) {
     // pdf.format always overrides width and height, so we must delete it
     // when user explicitly wants to set width and height
     opts.pdf.format = undefined;
@@ -103,7 +120,7 @@ async function render(_opts = {}) {
       await client.send('Network.setCookies', { cookies: opts.cookies });
     }
 
-    if (opts.html) {
+    if (_.isString(opts.html)) {
       logger.info('Set HTML ..');
       await page.setContent(opts.html, opts.goto);
     } else {
@@ -151,6 +168,10 @@ async function render(_opts = {}) {
     }
 
     if (opts.output === 'pdf') {
+      if (opts.pdf.fullPage) {
+        const height = await getFullPageHeight(page);
+        opts.pdf.height = height;
+      }
       data = await page.pdf(opts.pdf);
     } else if (opts.output === 'html') {
       data = await page.evaluate(() => document.body.innerHTML);
@@ -162,8 +183,14 @@ async function render(_opts = {}) {
       if (clipContainsSomething) {
         screenshotOpts.clip = opts.screenshot.clip;
       }
-
-      data = await page.screenshot(screenshotOpts);
+      if (_.isNil(opts.screenshot.selector)) {
+        data = await page.screenshot(screenshotOpts);
+      } else {
+        const selElement = await page.$(opts.screenshot.selector);
+        if (!_.isNull(selElement)) {
+          data = await selElement.screenshot();
+        }
+      }
     }
   } catch (err) {
     logger.error(`Error when rendering page: ${err}`);
